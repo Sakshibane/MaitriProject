@@ -1,0 +1,7 @@
+/Users/sakshibane/maitri-project/maitri-backend-spring/src/main/java/com/example/maitri_backend_spring/MaitriBackendSpringApplication.java
+/Users/sakshibane/maitri-project/maitri-backend-spring/src/main/java/com/example/maitri_backend_spring/config/AppConfig.java
+/Users/sakshibane/maitri-project/maitri-backend-spring/src/main/java/com/example/maitri_backend_spring/config/SecurityConfig.java
+/Users/sakshibane/maitri-project/maitri-backend-spring/src/main/java/com/example/maitri_backend_spring/controller/JournalController.java
+/Users/sakshibane/maitri-project/maitri-backend-spring/src/main/java/com/example/maitri_backend_spring/entity/JournalEntry.java
+/Users/sakshibane/maitri-project/maitri-backend-spring/src/main/java/com/example/maitri_backend_spring/repository/JournalEntryRepository.java
+/Users/sakshibane/maitri-project/maitri-backend-spring/src/main/java/com/example/maitri_backend_spring/service/AnalysisService.java
