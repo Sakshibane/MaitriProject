@@ -1,179 +1,128 @@
-from flask import Flask, jsonify, request, g, Response, stream_with_context
+# maitri-ai-service-python/main.py
+
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
-import sqlite3
-import requests
-import json
+from ollama import Client
+import re
 
-# --- Configuration ---
-DATABASE = 'maitri.db'
 app = Flask(__name__)
+CORS(app) # Enable CORS for all routes
 
-# Ollama configuration
-OLLAMA_API_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "mistral" # Ensure this model is pulled locally
+# --- Ollama Configuration ---
+client = Client(host='http://localhost:11434')
+MODEL = 'llama3'
 
-# Configure CORS to allow Next.js (3000) and Spring Boot (8080)
-CORS(app, resources={r"/api/*": {"origins": ["http://localhost:3000", "http://localhost:8080"]},
-                     r"/analyze": {"origins": ["http://localhost:8080"]}})
+# --- Helper Functions ---
 
-# --- Database Functions ---
+def predict_critical_risk(wellbeing_score: int) -> bool:
+    """Simulates a predictive model to flag critical risk based on the score (3 or below)."""
+    return wellbeing_score <= 3
 
-def get_db():
-    """Establishes a database connection or returns the existing one."""
-    if 'db' not in g:
-        g.db = sqlite3.connect(DATABASE)
-        g.db.row_factory = sqlite3.Row
-    return g.db
+def detailed_analysis(text: str) -> dict:
+    """Performs full multi-faceted analysis using Ollama."""
 
-@app.teardown_appcontext
-def close_db(e=None):
-    """Closes the database connection."""
-    db = g.pop('db', None)
-    if db is not None:
-        db.close()
-
-def init_db():
-    """Initializes the database schema and adds test data."""
-    with app.app_context():
-        db = get_db()
-        cursor = db.cursor()
-
-        # Astronauts Table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS astronauts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                mission_role TEXT NOT NULL
-            );
-        ''')
-        # Health Logs Table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS health_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                astronaut_id INTEGER,
-                log_type TEXT NOT NULL,
-                data TEXT NOT NULL,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (astronaut_id) REFERENCES astronauts (id)
-            );
-        ''')
-
-        # Add a test astronaut if the table is empty
-        cursor.execute("SELECT COUNT(*) FROM astronauts")
-        if cursor.fetchone()[0] == 0:
-            db.execute("INSERT INTO astronauts (name, mission_role) VALUES (?, ?)", ('Commander Orion', 'Flight Commander'))
-            db.execute("INSERT INTO health_logs (astronaut_id, log_type, data) VALUES (?, ?, ?)",
-                       (1, 'mood', '{"level": "calm", "note": "Routine check."}'))
-            db.commit()
-
-init_db()
-
-# ------------------------------------------------
-# --- API Endpoints ---
-# ------------------------------------------------
-
-@app.route('/')
-def home():
-    """Simple health check endpoint."""
-    return jsonify({"message": "MAITRI Python Backend API (Port 5001) is running!", "status": "OK"})
-
-@app.route('/api/v1/health_logs', methods=['GET'])
-def get_health_logs():
-    """Fetches health logs for the physical well-being dashboard."""
-    db = get_db()
-    logs = db.execute('SELECT * FROM health_logs ORDER BY timestamp DESC LIMIT 10').fetchall()
-    logs_list = [dict(log) for log in logs]
-    return jsonify({"health_logs": logs_list, "count": len(logs_list)})
-
-
-@app.route('/api/v1/maitri/chat', methods=['POST'])
-def maitri_chat():
-    """Endpoint for direct conversational chat (Next.js -> Flask -> Ollama)."""
-    data = request.get_json()
-    user_prompt = data.get('prompt')
-
-    if not user_prompt:
-        return jsonify({"error": "No prompt provided"}), 400
-
-    system_prompt = (
-        "You are MAITRI, an empathetic, helpful AI companion for an astronaut on a long-duration space mission. "
-        "Keep your tone encouraging and professional. Respond to the user's prompt."
+    # --- 1. Sentiment Analysis ---
+    sentiment_prompt = (
+        f"Analyze the overall sentiment of the entry. Respond with ONLY one word: 'Positive', 'Negative', or 'Mixed'. "
+        f"Entry: '{text}'"
     )
+    sentiment_response = client.generate(model=MODEL, prompt=sentiment_prompt, options={'temperature': 0.1})
+    sentiment = sentiment_response['response'].strip()
 
-    ollama_payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": f"System: {system_prompt}\nUser: {user_prompt}",
-        "stream": True
-    }
+    # --- 2. Key Theme Extraction ---
+    theme_prompt = (
+        f"Identify the SINGLE most important, high-level theme or subject. "
+        f"Respond with a concise phrase of 2-4 words. Entry: '{text}'"
+    )
+    theme_response = client.generate(model=MODEL, prompt=theme_prompt, options={'temperature': 0.5})
+    theme = theme_response['response'].strip()
+
+    # --- 3. Wellbeing Score ---
+    score_prompt = (
+        f"Assess the user's current well-being on a scale of 1 (crisis) to 10 (peak). "
+        f"Respond with ONLY the integer score. Entry: '{text}'"
+    )
+    score_response = client.generate(model=MODEL, prompt=score_prompt, options={'temperature': 0.1})
+    score_text = score_response['response'].strip()
 
     try:
-        ollama_response = requests.post(OLLAMA_API_URL, json=ollama_payload, stream=True, timeout=30)
-        ollama_response.raise_for_status()
+        match = re.search(r'\d+', score_text)
+        wellbeing_score = int(match.group(0)) if match else 5
+        wellbeing_score = max(1, min(10, wellbeing_score))
+    except (ValueError, TypeError):
+        wellbeing_score = 5
 
-        def generate():
-            for line in ollama_response.iter_lines():
-                if line:
-                    try:
-                        chunk = line.decode('utf-8')
-                        data_json = json.loads(chunk)
+        # --- 4. Risk Factors ---
+    risk_prompt = (
+        f"List potential risk factors (e.g., 'Isolation, Stress'). If none, respond with 'None'. "
+        f"Entry: '{text}'"
+    )
+    risk_response = client.generate(model=MODEL, prompt=risk_prompt, options={'temperature': 0.3})
+    risk_factors = risk_response['response'].strip()
 
-                        if 'response' in data_json:
-                            yield data_json['response']
+    # --- 5. Named Entity/Keywords Extraction (NEW) ---
+    ner_prompt = (
+        f"Extract the main NAMES (people, places) and key TOPICS/keywords. Respond with a comma-separated list. "
+        f"Entry: '{text}'"
+    )
+    ner_response = client.generate(model=MODEL, prompt=ner_prompt, options={'temperature': 0.1})
+    named_entities = ner_response['response'].strip()
 
-                        if data_json.get('done'):
-                            break
-                    except json.JSONDecodeError:
-                        continue
+    # --- 6. Abstractive Summary (NEW) ---
+    summary_prompt = (
+        f"Provide a concise, abstractive summary of the journal entry in one sentence (max 20 words). "
+        f"Entry: '{text}'"
+    )
+    summary_response = client.generate(model=MODEL, prompt=summary_prompt, options={'temperature': 0.7})
+    summary = summary_response['response'].strip()
 
-        return Response(stream_with_context(generate()), mimetype='text/plain')
+    # --- 7. Critical Risk Prediction ---
+    critical_risk = predict_critical_risk(wellbeing_score)
 
-    except requests.exceptions.ConnectionError:
-        return jsonify({"error": "Failed to connect to Ollama. Is it running?"}), 503
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"Ollama request failed: {e}"}), 500
+    # --- 8. Return Combined Result ---
+    return {
+        'sentiment': sentiment,
+        'theme': theme,
+        'wellbeingScore': wellbeing_score,
+        'riskFactors': risk_factors,
+        'criticalRisk': critical_risk,
+        'namedEntities': named_entities,
+        'summary': summary
+    }
 
+# --- API Routes ---
 
 @app.route('/analyze', methods=['POST'])
-def analyze_text():
-    """NEW: Endpoint called by the Spring Boot backend for Journal Entry analysis."""
-    data = request.get_json()
-    text_to_analyze = data.get('text', '')
+def analyze():
+    data = request.json
+    if not data or 'text' not in data:
+        return jsonify({"error": "Missing 'text' field in request body"}), 400
 
-    if not text_to_analyze:
-        return jsonify({"error": "No text provided for analysis"}), 400
+    text = data['text']
+    analysis_result = detailed_analysis(text)
 
-    # Define the simplified sentiment analysis prompt
-    ollama_payload = {
-        "model": OLLAMA_MODEL,
-        # Ask the model to classify the sentiment and only return a single word/phrase.
-        "prompt": f"System: You are a quick text analysis service. Analyze the following journal entry for its overall sentiment. Respond ONLY with one of the following words: 'Positive', 'Negative', 'Neutral', 'Mixed'.\n\nEntry: '{text_to_analyze}'",
-        "stream": False,
-        "options": {"temperature": 0.1} # Low temperature for deterministic output
-    }
+    return jsonify(analysis_result)
 
-    try:
-        ollama_response = requests.post(OLLAMA_API_URL, json=ollama_payload)
-        ollama_response.raise_for_status()
+@app.route('/recommend', methods=['POST'])
+def recommend():
+    data = request.json
+    if not data or 'prompt' not in data:
+        return jsonify({"error": "Missing 'prompt' field in request body"}), 400
 
-        response_data = ollama_response.json()
-        raw_sentiment = response_data.get('response', 'Neutral').strip()
+    prompt = data['prompt']
 
-        # Simple cleanup
-        sentiment = raw_sentiment.split('\n')[0].replace('.', '')
+    recommendation_response = client.generate(
+        model=MODEL,
+        prompt=prompt,
+        options={'temperature': 0.8}
+    )
+    recommendation = recommendation_response['response'].strip()
 
-        # Return the structured JSON expected by the Spring Boot AnalysisService
-        return jsonify({"sentiment": sentiment})
+    # Return as plain text for the Recommendation API
+    response = make_response(recommendation, 200)
+    response.mimetype = "text/plain"
+    return response
 
-    except requests.exceptions.ConnectionError:
-        return jsonify({"sentiment": "Analysis Failed - Ollama Down"}), 503
-    except Exception as e:
-        print(f"Analysis Error: {e}")
-        return jsonify({"sentiment": "Analysis Failed"}), 500
-
-
-# ------------------------------------------------
-# --- Main Run Block (Port 5001) ---
-# ------------------------------------------------
 if __name__ == '__main__':
-    # Flask runs on the new stable port 5001
-    app.run(debug=True, host='0.0.0.0', port=5001)
+    # Flask will run on http://localhost:5001
+    app.run(port=5001, debug=True, threaded=True)
